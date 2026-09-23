@@ -1,0 +1,64 @@
+name: Publish DWJetDatabaseReader to GitHub Packages
+
+on:
+  push:
+    tags:
+      - 'dwjet-v*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: github.repository == 'NoahFetz/JetDatabaseReader'
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          source-url: https://nuget.pkg.github.com/NoahFetz/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content JetDatabaseReader/JetDatabaseReader.csproj
+          $version = ($project.Project.PropertyGroup | Where-Object Version | Select-Object -First 1).Version
+          if ($env:GITHUB_REF_NAME -ne "dwjet-v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $version."
+          }
+
+      - name: Test
+        run: dotnet test JetDatabaseReader.Tests/JetDatabaseReader.Tests.csproj --framework net8.0 --configuration Release
+
+      - name: Pack
+        run: dotnet pack JetDatabaseReader/JetDatabaseReader.csproj --configuration Release --no-restore
+
+      - name: Refuse packages containing absolute build paths
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $package = Resolve-Path JetDatabaseReader/bin/Release/DWJetDatabaseReader.3.0.0-dw.1.nupkg
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($package)
+          try {
+            foreach ($entry in $zip.Entries | Where-Object { $_.FullName -match '\.(dll|pdb|exe)$' }) {
+              $stream = New-Object System.IO.MemoryStream
+              try {
+                $entry.Open().CopyTo($stream)
+                $contents = [System.Text.Encoding]::ASCII.GetString($stream.ToArray())
+                if ($contents -match '[A-Za-z]:\\[A-Za-z0-9_\-\. ]{6,}') {
+                  throw "Absolute build path found in $($entry.FullName)."
+                }
+              }
+              finally { $stream.Dispose() }
+            }
+          }
+          finally { $zip.Dispose() }
+
+      - name: Publish to GitHub Packages
+        run: dotnet nuget push JetDatabaseReader/bin/Release/DWJetDatabaseReader.3.0.0-dw.1.nupkg --source https://nuget.pkg.github.com/NoahFetz/index.json
